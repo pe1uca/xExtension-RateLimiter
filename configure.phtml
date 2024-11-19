@@ -1,3 +1,6 @@
+<p class="help"><img class="icon" src="../themes/icons/help.svg" loading="lazy" alt="ℹ️"> These settings are for sites without special configurations.<br/>
+For sites with known responses the extension uses the data provided by the site.</p>
+
 <form action="<?php echo _url('extension', 'configure', 'e', urlencode($this->getName())); ?>" method="post">
 	<input type="hidden" name="_csrf" value="<?php echo FreshRSS_Auth::csrfToken(); ?>" />
 	<div class="form-group">

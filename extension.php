@@ -21,6 +21,10 @@ final class RateLimiterExtension extends Minz_Extension {
             $this,
             'feedUpdate',
         ]);
+        $this->registerHook('simplepie_after_init', [
+            $this,
+            'afterDataFetch',
+        ]);
 
         $this->db = new SQLite3(self::DB_PATH);
         $this->loadConfig();
@@ -38,7 +42,9 @@ final class RateLimiterExtension extends Minz_Extension {
                 `id` INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL,
                 `domain` TEXT UNIQUE, 
                 `lastUpdate` BIGINT DEFAULT 0,
-                `count` INTEGER DEFAULT 0
+                `count` INTEGER DEFAULT 0,
+                `rateLimited` INTEGER DEFAULT FALSE,
+                `retryAfter` INTEGER
             )'
         );
         $this->db->exec(
@@ -99,11 +105,19 @@ final class RateLimiterExtension extends Minz_Extension {
         $lastUpdate = -1;
         if ($data) {
             $lastUpdate = $data['lastUpdate'];
+            $rateLimited = $data['rateLimited'];
+            $retryAfter = $data['retryAfter'];
 
             // Only get `count` if we're still within the window. Otherwise we can stay at 0.  
             if (time() - $lastUpdate <= $this->rateLimitWindow) {
                 $count = $data['count'];
             }
+
+            // Check if the site has been rate limited by headers and the time hasn't yet expired.  
+            if ($rateLimited && $retryAfter > time()) {
+                return null;
+            }
+            $this->resetDomainRateLimit($host);
         }
 
         // If there have been more than the configured count of recent requests we stop processing feeds
@@ -119,9 +133,32 @@ final class RateLimiterExtension extends Minz_Extension {
         return $feed;
     }
 
+    public function afterDataFetch(
+        \SimplePie\SimplePie $simplePie, 
+        FreshRSS_Feed $feed, 
+        bool $simplePieResult
+    ) {
+        if (!$simplePieResult) {
+            return;
+        }
+
+        $isFromCache = empty($simplePie->raw_data);
+        if ($isFromCache) {
+            return;
+        }
+
+        $host = parse_url($feed->url(), PHP_URL_HOST);
+        $headers = $simplePie->data['headers'];
+
+        [$rateLimited, $retryAfter] = $this->processHeaders($headers);
+        if ($rateLimited) {
+            $this->updateDomainRateLimit($host, $rateLimited, $retryAfter);
+        }
+    }
+
     private function getDomainData(string $domain) {
         try {
-            $stmt = $this->db->prepare("SELECT `lastUpdate`, `count` FROM `sites` WHERE `domain`=:domain");
+            $stmt = $this->db->prepare("SELECT `lastUpdate`, `count`, `rateLimited`, `retryAfter` FROM `sites` WHERE `domain`=:domain");
             $stmt->bindValue(':domain', $domain, SQLITE3_TEXT);
             $result = $stmt->execute();
 
@@ -132,7 +169,11 @@ final class RateLimiterExtension extends Minz_Extension {
         }
     }
 
-    private function updateDomainData(string $domain, int $lastUpdate, int $count) {
+    private function updateDomainData(
+        string $domain,
+        int $lastUpdate,
+        int $count
+    ) {
         $stmt = $this->db->prepare(
             'INSERT INTO `sites`(`domain`, `lastUpdate`, `count`)
                     VALUES(:domain, :lastUpdate, :count) ON CONFLICT(`domain`) 
@@ -143,6 +184,50 @@ final class RateLimiterExtension extends Minz_Extension {
         $stmt->bindValue(':count', $count, SQLITE3_INTEGER);
         $stmt->execute();
         $stmt->close();
+    }
+
+    private function updateDomainRateLimit(
+        string $domain,
+        bool $rateLimited,
+        int $retryAfter
+    ) {
+        $stmt = $this->db->prepare(
+            'INSERT INTO `sites`(`domain`, `rateLimited`, `retryAfter`)
+                    VALUES(:domain, :rateLimited, :retryAfter) ON CONFLICT(`domain`) 
+                    DO UPDATE SET `rateLimited`=:rateLimited, `retryAfter`=:retryAfter'
+        );
+        $stmt->bindValue(':rateLimited', $rateLimited, SQLITE3_INTEGER);
+        $stmt->bindValue(':domain', $domain, SQLITE3_TEXT);
+        $stmt->bindValue(':retryAfter', $retryAfter, SQLITE3_INTEGER);
+        $stmt->execute();
+        $stmt->close();
+    }
+
+    private function resetDomainRateLimit(string $domain) {
+        $this->updateDomainRateLimit($domain, false, 0);
+    }
+
+    function processHeaders(array $headers) {
+        $rateLimited = false;
+        $retryAfter = 0;
+
+        if (isset($headers['x-ratelimit-remaining'])) {
+            $rateLimited = ((int)$headers['x-ratelimit-remaining']) <= 0;
+        }
+        if (isset($headers['x-ratelimit-reset'])) {
+            $retryAfter = time() + ((int)$headers['x-ratelimit-reset']);
+        }
+
+        // Check if the site has rate limited us but we don't know when to retry.  
+        if ($rateLimited && !$retryAfter) {
+            // Default to use the rate limit window the user set
+            $retryAfter = time() + $this->rateLimitWindow;
+        }
+
+        return [
+            $rateLimited,
+            $retryAfter
+        ];
     }
 }
 
