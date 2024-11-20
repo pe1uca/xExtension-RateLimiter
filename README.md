@@ -6,7 +6,7 @@ Based on this it prevents making too many requests to each site in a short perio
 # Requirements  
 
 - SQLite3 module for PHP (If you're using the docker deploy this should be already sorted out for you)  
-- FreshRSS 1.25.0
+- FreshRSS 1.25.0 (for older versions check the branch `pre-1.25`)  
 
 # Configuration  
 
