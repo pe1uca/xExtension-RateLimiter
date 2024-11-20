@@ -140,14 +140,9 @@ final class RateLimiterExtension extends Minz_Extension {
         FreshRSS_Feed $feed, 
         bool $simplePieResult
     ) {
-        if (!$simplePieResult) {
-            extensionLog("Request failed");
-            return;
-        }
-
-        $isFromCache = empty($simplePie->raw_data);
-        if ($isFromCache) {
-            extensionLog("Request used cache");
+        // Check if there has been a request to the site
+        if ($simplePie->status_code == 0) {
+            extensionLog("Cache has been used");
             return;
         }
 
@@ -155,10 +150,9 @@ final class RateLimiterExtension extends Minz_Extension {
         extensionLog("Site '$host' has been hit");
         $this->bumpDomainCount($host);
 
-        $headers = $simplePie->data['headers'];
-        [$rateLimited, $retryAfter] = $this->processHeaders($headers);
+        [$rateLimited, $retryAfter] = $this->analizeRequest($simplePie);
         if ($rateLimited) {
-            extensionLog("The site '$host' rate limited us unitl $retryAfter");
+            extensionLog("The site '$host' rate limited us until $retryAfter");
             $this->updateDomainRateLimit($host, $rateLimited, $retryAfter);
         }
     }
@@ -227,7 +221,9 @@ final class RateLimiterExtension extends Minz_Extension {
         $stmt->close();
     }
 
-    function processHeaders(array $headers) {
+    function analizeRequest(\SimplePie\SimplePie $simplePie) {
+        $headers = $simplePie->data['headers'] ?? [];
+        $statusCode = $simplePie->status_code;
         $rateLimited = false;
         $retryAfter = 0;
 
@@ -236,6 +232,13 @@ final class RateLimiterExtension extends Minz_Extension {
         }
         if (isset($headers['x-ratelimit-reset'])) {
             $retryAfter = time() + ((int)$headers['x-ratelimit-reset']);
+        }
+        if (isset($headers['Retry-After'])) {
+            $retryAfter = time() + ((int)$headers['Retry-After']);
+        }
+
+        if ($statusCode == 429) {
+            $rateLimited = true;
         }
 
         // Check if the site has rate limited us but we don't know when to retry.  
