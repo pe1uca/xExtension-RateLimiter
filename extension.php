@@ -38,7 +38,9 @@ final class RateLimiterExtension extends Minz_Extension {
                 `id` INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL,
                 `domain` TEXT UNIQUE, 
                 `lastUpdate` BIGINT DEFAULT 0,
-                `count` INTEGER DEFAULT 0
+                `count` INTEGER DEFAULT 0,
+                `rateLimited` INTEGER DEFAULT FALSE,
+                `retryAfter` INTEGER
             )'
         );
         $this->db->exec(
