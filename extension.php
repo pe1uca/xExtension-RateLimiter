@@ -109,13 +109,13 @@ final class RateLimiterExtension extends Minz_Extension {
             $lastUpdate = $data['lastUpdate'];
             $rateLimited = $data['rateLimited'];
             $retryAfter = $data['retryAfter'];
-            $resetCount = false;
+            $resetCount = true;
 
             // Only get `count` if we're still within the window. Otherwise we can stay at 0.  
-            if (time() - $lastUpdate >= $this->rateLimitWindow) {
-                extensionLog("We can reset count");
+            if (time() - $lastUpdate <= $this->rateLimitWindow) {
+                extensionLog("We need to use count");
                 $count = $data['count'];
-                $resetCount = true;
+                $resetCount = false;
             }
 
             // Check if the site has been rate limited by headers and the time hasn't yet expired.  
