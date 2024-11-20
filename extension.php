@@ -113,7 +113,7 @@ final class RateLimiterExtension extends Minz_Extension {
 
             // Only get `count` if we're still within the window. Otherwise we can stay at 0.  
             if (time() - $lastUpdate <= $this->rateLimitWindow) {
-                extensionLog("We need to use count");
+                extensionLog("We need to use count for $host");
                 $count = $data['count'];
                 $resetCount = false;
             }
@@ -184,7 +184,10 @@ final class RateLimiterExtension extends Minz_Extension {
 
     private function resetDomainRateLimit(string $domain, bool $resetCount = false) {
         $this->updateDomainRateLimit($domain, false, 0);
-        if ($resetCount) $this->updateDomainData($domain, time(), 0);
+        if ($resetCount) {
+            extensionLog("Reset count for $domain");
+            $this->updateDomainData($domain, time(), 0);
+        }
     }
 
     private function updateDomainRateLimit(

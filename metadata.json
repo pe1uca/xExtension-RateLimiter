@@ -2,7 +2,7 @@
   "name": "RateLimitFeeds",
   "author": "pe1uca",
   "description": "Rate limit feed updates per site.",
-  "version": "1.0.0",
+  "version": "2.0.0",
   "entrypoint": "RateLimiter",
   "type": "system"
 }
