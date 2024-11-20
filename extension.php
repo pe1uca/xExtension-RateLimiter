@@ -1,6 +1,6 @@
 <?php
 
-const DEBUG = true;
+const DEBUG = false;
 
 final class RateLimiterExtension extends Minz_Extension {
 
