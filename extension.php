@@ -29,6 +29,7 @@ final class RateLimiterExtension extends Minz_Extension {
         ]);
 
         $this->db = new SQLite3(self::DB_PATH);
+        $this->db->busyTimeout(1000);
         $this->loadConfig();
     }
 
@@ -45,6 +46,8 @@ final class RateLimiterExtension extends Minz_Extension {
                 `domain` TEXT UNIQUE, 
                 `lastUpdate` BIGINT DEFAULT 0,
                 `count` INTEGER DEFAULT 0,
+                `remaining` INTEGER DEFAULT 0,
+                `countStartTime` BIGINT DEFAULT -1,
                 `rateLimited` INTEGER DEFAULT FALSE,
                 `retryAfter` INTEGER
             )'
@@ -103,31 +106,32 @@ final class RateLimiterExtension extends Minz_Extension {
     public function feedUpdate(FreshRSS_Feed $feed) {
         $host = parse_url($feed->url(), PHP_URL_HOST);
         $data = $this->getDomainData($host);
-        $count = 0;
-        $lastUpdate = -1;
-        if ($data) {
-            $lastUpdate = $data['lastUpdate'];
-            $rateLimited = $data['rateLimited'];
-            $retryAfter = $data['retryAfter'];
-            $resetCount = true;
 
-            // Only get `count` if we're still within the window. Otherwise we can stay at 0.  
-            if (time() - $lastUpdate <= $this->rateLimitWindow) {
-                extensionLog("We need to use count for $host");
-                $count = $data['count'];
-                $resetCount = false;
-            }
-
-            // Check if the site has been rate limited by headers and the time hasn't yet expired.  
-            if ($rateLimited && $retryAfter > time()) {
-                extensionLog("Rate limited by domain and retry after is still in the future");
-                return null;
-            }
-            $this->resetDomainRateLimit($host, $resetCount);
+        if (!$data) {
+            return $feed;
         }
 
+        $countStartTime = $data['countStartTime'];
+        $rateLimited = $data['rateLimited'];
+        $retryAfter = $data['retryAfter'];
+        $remaining = $data['remaining'];
+        $resetCount = false;
+
+        // Check if `remaining` started to count before the window (-1 means unset)
+        if ($countStartTime > 0 && time() - $countStartTime >= $this->rateLimitWindow) {
+            extensionLog("$host's remaining can be reset");
+            $resetCount = true;
+        }
+
+        // Check if the site has been rate limited by headers and the time hasn't yet expired.  
+        if ($rateLimited && $retryAfter > time()) {
+            extensionLog("Rate limited by $host and retry after is still in the future");
+            return null;
+        }
+        $this->resetDomainRateLimit($host, $resetCount);
+
         // If there have been more than the configured count of recent requests we stop processing feeds
-        if ($count >= $this->maxRateLimitCount) {
+        if ($remaining <= 0) {
             extensionLog("Custom rate limit reached");
             return null;
         }
@@ -148,36 +152,61 @@ final class RateLimiterExtension extends Minz_Extension {
 
         $host = parse_url($feed->url(), PHP_URL_HOST);
         extensionLog("Site '$host' has been hit");
-        $this->bumpDomainCount($host);
 
-        [$rateLimited, $retryAfter] = $this->analizeRequest($simplePie);
+        [$rateLimited, $retryAfter, $remaining] = $this->analizeRequest($simplePie);
         if ($rateLimited) {
             extensionLog("The site '$host' rate limited us until $retryAfter");
             $this->updateDomainRateLimit($host, $rateLimited, $retryAfter);
         }
+        $this->updateDomainCount($host, $remaining);
     }
 
     private function getDomainData(string $domain) {
         try {
-            $stmt = $this->db->prepare("SELECT `lastUpdate`, `count`, `rateLimited`, `retryAfter` FROM `sites` WHERE `domain`=:domain");
+            $stmt = $this->db->prepare("SELECT * FROM `sites` WHERE `domain`=:domain");
+            if ($stmt === false) return false;
             $stmt->bindValue(':domain', $domain, SQLITE3_TEXT);
             $result = $stmt->execute();
 
-            return $result->fetchArray();
+            return $result ? $result->fetchArray() : false;
         } finally {
-            $result->finalize();
-            $stmt->close();
+            if ($result)
+                $result->finalize();
+            if ($stmt)
+                $stmt->close();
         }
     }
 
-    private function bumpDomainCount(string $domain) {
+    private function updateDomainCount(string $domain, int $remaining = null) {
+        $prev = $this->getDomainData($domain);
+        $newRemaining = $this->maxRateLimitCount - 1;
+        $countStartTime = time();
+        if ($prev) {
+            $dbRemaining = $prev['remaining'] - 1;
+            $dbStartTime = $prev['countStartTime'];
+            // If the start time is within the window we take DB data.
+            if ($dbStartTime > 0 && time() - $dbStartTime <= $this->rateLimitWindow) {
+                $newRemaining = $dbRemaining;
+                $countStartTime = $dbStartTime;
+            }
+        }
+
+        // If $remaining was provided it's preferred
+        if ($remaining) {
+            $newRemaining = $remaining;
+        }
+        extensionLog("New remaining: $newRemaining");
+        extensionLog("Start time: $countStartTime");
+
         $stmt = $this->db->prepare(
-            'INSERT INTO `sites`(`domain`, `lastUpdate`, `count`)
-                    VALUES(:domain, :lastUpdate, 1) ON CONFLICT(`domain`) 
-                    DO UPDATE SET `lastUpdate`=:lastUpdate, `count`=`count`+1'
+            'INSERT INTO `sites`(`domain`, `lastUpdate`, `count`, `remaining`, `countStartTime`)
+                    VALUES(:domain, :lastUpdate, 1, :remaining, :countStartTime) ON CONFLICT(`domain`) 
+                    DO UPDATE SET `lastUpdate`=:lastUpdate, `count`=`count`+1, `remaining`=:remaining, `countStartTime`=:countStartTime'
         );
         $stmt->bindValue(':lastUpdate', time(), SQLITE3_INTEGER);
         $stmt->bindValue(':domain', $domain, SQLITE3_TEXT);
+        $stmt->bindValue(':remaining', $newRemaining, SQLITE3_INTEGER);
+        $stmt->bindValue(':countStartTime', $countStartTime, SQLITE3_INTEGER);
         $stmt->execute();
         $stmt->close();
     }
@@ -186,7 +215,7 @@ final class RateLimiterExtension extends Minz_Extension {
         $this->updateDomainRateLimit($domain, false, 0);
         if ($resetCount) {
             extensionLog("Reset count for $domain");
-            $this->updateDomainData($domain, time(), 0);
+            $this->updateDomainData($domain, time(), 0, $this->maxRateLimitCount);
         }
     }
 
@@ -210,16 +239,19 @@ final class RateLimiterExtension extends Minz_Extension {
     private function updateDomainData(
         string $domain,
         int $lastUpdate,
-        int $count
+        int $count,
+        int $remaining
     ) {
         $stmt = $this->db->prepare(
-            'INSERT INTO `sites`(`domain`, `lastUpdate`, `count`)
-                    VALUES(:domain, :lastUpdate, :count) ON CONFLICT(`domain`) 
-                    DO UPDATE SET `lastUpdate`=:lastUpdate, `count`=:count'
+            'INSERT INTO `sites`(`domain`, `lastUpdate`, `count`, `remaining`, `countStartTime`)
+                    VALUES(:domain, :lastUpdate, :count, :remaining, :countStartTime) ON CONFLICT(`domain`) 
+                    DO UPDATE SET `lastUpdate`=:lastUpdate, `count`=:count, `remaining`=:remaining, `countStartTime`=:countStartTime'
         );
         $stmt->bindValue(':lastUpdate', $lastUpdate, SQLITE3_INTEGER);
         $stmt->bindValue(':domain', $domain, SQLITE3_TEXT);
         $stmt->bindValue(':count', $count, SQLITE3_INTEGER);
+        $stmt->bindValue(':remaining', $remaining, SQLITE3_INTEGER);
+        $stmt->bindValue(':countStartTime', -1, SQLITE3_INTEGER);
         $stmt->execute();
         $stmt->close();
     }
@@ -229,9 +261,12 @@ final class RateLimiterExtension extends Minz_Extension {
         $statusCode = $simplePie->status_code;
         $rateLimited = false;
         $retryAfter = 0;
+        $remaining = null;
 
         if (isset($headers['x-ratelimit-remaining'])) {
-            $rateLimited = ((int)$headers['x-ratelimit-remaining']) <= 0;
+            $remaining = (int)$headers['x-ratelimit-remaining'];
+            extensionLog("Header: $remaining");
+            $rateLimited = $remaining <= 0;
         }
         if (isset($headers['x-ratelimit-reset'])) {
             $retryAfter = time() + ((int)$headers['x-ratelimit-reset']);
@@ -240,6 +275,7 @@ final class RateLimiterExtension extends Minz_Extension {
             $retryAfter = time() + ((int)$headers['Retry-After']);
         }
 
+        extensionLog("Code: $statusCode");
         if ($statusCode == 429) {
             $rateLimited = true;
         }
@@ -252,7 +288,8 @@ final class RateLimiterExtension extends Minz_Extension {
 
         return [
             $rateLimited,
-            $retryAfter
+            $retryAfter,
+            $remaining
         ];
     }
 }
