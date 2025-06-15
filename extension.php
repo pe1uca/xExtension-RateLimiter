@@ -14,7 +14,7 @@ final class RateLimiterExtension extends Minz_Extension {
 
     public $rateLimitWindow;
 
-    public $maxRateLimitCount;
+    public $maxRateLimitCount = self::DEFAULT_RATE_LIMIT;
 
     public function init() {
         parent::init();
@@ -38,28 +38,33 @@ final class RateLimiterExtension extends Minz_Extension {
             return 'SQLite3 extension not found';
         }
 
-        $this->db = new SQLite3(self::DB_PATH);
-        $this->db->exec(
-            'CREATE TABLE IF NOT EXISTS `sites` 
-            (
-                `id` INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL,
-                `domain` TEXT UNIQUE, 
-                `lastUpdate` BIGINT DEFAULT 0,
-                `count` INTEGER DEFAULT 0,
-                `remaining` INTEGER DEFAULT 0,
-                `countStartTime` BIGINT DEFAULT -1,
-                `rateLimited` INTEGER DEFAULT FALSE,
-                `retryAfter` INTEGER
-            )'
-        );
-        $this->db->exec(
-            'CREATE TABLE IF NOT EXISTS `config` 
-            (
-                `id` INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL,
-                `name` TEXT UNIQUE, 
-                `value` TEXT
-            )'
-        );
+        try {
+            $this->db = new SQLite3(self::DB_PATH);
+            $this->db->exec(
+                'CREATE TABLE IF NOT EXISTS `sites` 
+                (
+                    `id` INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL,
+                    `domain` TEXT UNIQUE, 
+                    `lastUpdate` BIGINT DEFAULT 0,
+                    `count` INTEGER DEFAULT 0,
+                    `remaining` INTEGER DEFAULT 0,
+                    `countStartTime` BIGINT DEFAULT -1,
+                    `rateLimited` INTEGER DEFAULT FALSE,
+                    `retryAfter` INTEGER
+                )'
+            );
+            $this->db->exec(
+                'CREATE TABLE IF NOT EXISTS `config` 
+                (
+                    `id` INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL,
+                    `name` TEXT UNIQUE, 
+                    `value` TEXT
+                )'
+            );
+            $this->resetDomainRateLimit('localhost', true);
+        } catch (\Throwable $th) {
+            return $th->getMessage();
+        }
 
         return true;
     }
