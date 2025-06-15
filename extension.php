@@ -144,13 +144,22 @@ final class RateLimiterExtension extends Minz_Extension {
         FreshRSS_Feed $feed, 
         bool $simplePieResult
     ) {
+        $host = parse_url($feed->url(), PHP_URL_HOST);
         // Check if there has been a request to the site
-        if ($simplePie->status_code == 0) {
+        // Simplepie returns code=0 and the cached data.
+        if ($simplePie->status_code == 0 && $simplePie->data) {
             extensionLog("Cache has been used");
             return;
         }
+        // Simplepie has a bug, it's unable to report http error codes (https://github.com/FreshRSS/FreshRSS/issues/7038)
+        // We assume code=0 and no data means the site was hit but an HTTP error was returned.
+        if ($simplePie->status_code == 0 && !$simplePie->data) {
+            extensionLog("HTTP error");
+            // Assume we can't make any more requests
+            $this->updateDomainCount($host, 0);
+            return;
+        }
 
-        $host = parse_url($feed->url(), PHP_URL_HOST);
         extensionLog("Site '$host' has been hit");
 
         [$rateLimited, $retryAfter, $remaining] = $this->analizeRequest($simplePie);
@@ -192,7 +201,7 @@ final class RateLimiterExtension extends Minz_Extension {
         }
 
         // If $remaining was provided it's preferred
-        if ($remaining) {
+        if ($remaining !== null) {
             $newRemaining = $remaining;
         }
         extensionLog("New remaining: $newRemaining");
